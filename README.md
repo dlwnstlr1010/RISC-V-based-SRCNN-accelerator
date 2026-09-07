@@ -57,20 +57,7 @@ backup_bitstream/             three validated .bit snapshots from key milestones
 
 ## Architecture
 
-```
-DDR3 ── AXI 256-bit (dedicated, bypasses the SoC crossbar) ──┐
-  │                                                            │
-  ▼                                                            │
-hwpe_im2col ──► hwpe_axi_dma ──► hwpe_systolic_array ──► hwpe_post_proc
-(line buffer,     (BRAM double-      (64 PE, weight-        (Q8.8 → ReLU
- 4-way parallel    buffer)            stationary,             → clamp)
- read)                                Mode A/B remap)                │
-     ▲                                     ▲                         │
-     │                              hwpe_weight_buf                  │
-     │                              (TCDM ← L2 SRAM,                 │
-     │                               weight/bias only)               │
-     └─────────────── DDR3 (INPUT / OutA / OutB / im2col workspace) ◄┘
-```
+![SoC and accelerator block diagram](docs/architecture.png)
 
 The CPU's own path (CSR configuration, weight/bias staging) and the
 accelerator's bulk-data path are physically separate: CSR writes go through
@@ -138,6 +125,33 @@ Then apply the patches in `rtl/integration/` against the checked-out
 `pulp_soc` sources (`.bender/git/checkouts/pulp_soc-*/`), and drop the files
 from `rtl/` into `rtl/fc/` in that same checkout. `sw/test.c` builds against
 PULP's `pulp-runtime` the normal way (`make clean all platform=fpga io=uart`).
+
+## License & attribution
+
+This project builds directly on [PULP Platform](https://pulp-platform.org/)
+(© ETH Zürich and University of Bologna), specifically
+[pulp-platform/pulp_soc](https://github.com/pulp-platform/pulp_soc) v5.0.1
+inside the [pulpissimo](https://github.com/pulp-platform/pulpissimo) SoC.
+PULP's own RTL is licensed under the
+[Solderpad Hardware License, Version 0.51](https://solderpad.org/licenses/SHL-0.51/).
+
+- `rtl/fc_hwpe.sv` is a **derivative work**: PULPissimo ships this file as an
+  empty HWPE stub carrying ETH Zürich / University of Bologna's original
+  Solderpad HSL v0.51 header, which is kept intact at the top of the file as
+  the license requires. Everything inside the FSM body (+966 lines) is
+  original work written for this project.
+- `rtl/hwpe_im2col.sv`, `hwpe_axi_dma.sv`, `hwpe_weight_buf.sv`,
+  `hwpe_systolic_array.sv`, `hwpe_post_proc.sv`, `rtl/legacy/*`, and
+  everything in `sw/` are wholly new files with no PULP-derived content.
+- `rtl/integration/*.diff` are unified diffs against PULP's own
+  `pulp_soc.sv` / `fc_subsystem.sv` / `soc_interconnect_wrap.sv` /
+  `l2_ram_multi_bank.sv` / `pkg_soc_interconnect.sv` (also Solderpad HSL
+  v0.51) — kept as diffs rather than full files so what's PULP's and what's
+  ours stays unambiguous.
+
+No PULP source beyond these attributed diffs and the one derivative file
+above is redistributed in this repo; the framework itself is fetched
+separately via Bender (see [Reproducing](#reproducing)).
 
 ## Development notes
 
