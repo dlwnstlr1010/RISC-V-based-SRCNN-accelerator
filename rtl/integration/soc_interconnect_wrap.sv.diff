@@ -1,0 +1,103 @@
+diff --git a/rtl/pulp_soc/soc_interconnect_wrap.sv b/rtl/pulp_soc/soc_interconnect_wrap.sv
+index 8ee8ce8..40b39a7 100644
+--- a/rtl/pulp_soc/soc_interconnect_wrap.sv
++++ b/rtl/pulp_soc/soc_interconnect_wrap.sv
+@@ -53,6 +53,7 @@ module soc_interconnect_wrap
+      XBAR_TCDM_BUS.Slave      tcdm_hwpe[NR_HWPE_PORTS],           // Hardware Processing Element ports
+      AXI_BUS.Slave            axi_master_plug,                    // Normally used for cluster -> SoC communication
+      AXI_BUS.Master           axi_slave_plug,                     // Normally used for SoC -> cluster communication
++     AXI_BUS.Master           axi_ddr_plug,                       // SoC -> DDR3 external memory
+      AXI_LITE.Master          axi_lite_peripheral_bus,            // Connects to all the SoC Peripherals
+      XBAR_TCDM_BUS.Master     l2_interleaved_slaves[NR_L2_PORTS], // Connects to the interleaved memory banks
+      XBAR_TCDM_BUS.Master     l2_private_slaves[2],               // Connects to core-private memory banks
+@@ -122,10 +123,11 @@ module soc_interconnect_wrap
+     '{ idx: 1 , start_addr: `SOC_MEM_MAP_PRIVATE_BANK1_START_ADDR , end_addr: `SOC_MEM_MAP_PRIVATE_BANK1_END_ADDR} ,
+     '{ idx: 2 , start_addr: `SOC_MEM_MAP_BOOT_ROM_START_ADDR      , end_addr: `SOC_MEM_MAP_BOOT_ROM_END_ADDR}};
+ 
+-  localparam NR_RULES_AXI_CROSSBAR = 2;
++  localparam NR_RULES_AXI_CROSSBAR = 3;
+   localparam addr_map_rule_t [NR_RULES_AXI_CROSSBAR-1:0] AXI_CROSSBAR_RULES = '{
+     '{ idx: 0, start_addr: `SOC_MEM_MAP_AXI_PLUG_START_ADDR,    end_addr: `SOC_MEM_MAP_AXI_PLUG_END_ADDR},
+-    '{ idx: 1, start_addr: `SOC_MEM_MAP_PERIPHERALS_START_ADDR, end_addr: `SOC_MEM_MAP_PERIPHERALS_END_ADDR}};
++    '{ idx: 1, start_addr: `SOC_MEM_MAP_PERIPHERALS_START_ADDR, end_addr: `SOC_MEM_MAP_PERIPHERALS_END_ADDR},
++    '{ idx: 2, start_addr: `SOC_MEM_MAP_DDR3_START_ADDR,        end_addr: `SOC_MEM_MAP_DDR3_END_ADDR}};
+ 
+   //For legacy reasons, the fc_data port can alias the address prefix 0x000 to 0x1c0. E.g. an access to 0x00001234 is
+   //mapped to 0x1c001234. The following lines perform this remapping.
+@@ -163,6 +165,14 @@ module soc_interconnect_wrap
+                 //if you want to add new master ports. The parameter is used by other IPs to calcualte
+                 //the required AXI ID width.
+ 
++  // Dummy tied-off interleaved-only port (HWPE moved to master_ports for DDR3 access)
++  XBAR_TCDM_BUS tcdm_hwpe_dummy[1]();
++  assign tcdm_hwpe_dummy[0].req   = 1'b0;
++  assign tcdm_hwpe_dummy[0].add   = '0;
++  assign tcdm_hwpe_dummy[0].wen   = 1'b1;
++  assign tcdm_hwpe_dummy[0].wdata = '0;
++  assign tcdm_hwpe_dummy[0].be    = '0;
++
+   //Assign Master Ports to array
+   `TCDM_ASSIGN_INTF(master_ports[0], tcdm_fc_data_addr_remapped)
+   `TCDM_ASSIGN_INTF(master_ports[1], tcdm_fc_instr)
+@@ -170,12 +180,17 @@ module soc_interconnect_wrap
+   `TCDM_ASSIGN_INTF(master_ports[3], tcdm_udma_rx)
+   `TCDM_ASSIGN_INTF(master_ports[4], tcdm_debug)
+ 
++  // HWPE ports 0-3: full address space access (including DDR3)
++  for (genvar i = 0; i < NR_HWPE_PORTS; i++) begin : hwpe_master_assign
++    `TCDM_ASSIGN_INTF(master_ports[5 + i], tcdm_hwpe[i])
++  end
++
+   //Assign the 4 master ports from the AXI plug to the interface array
+ 
+   //Synopsys 2019.3 has a bug; It doesn't handle expressions for array indices on the left-hand side of assignments.
+   // Using a macro instead of a package parameter is an ugly but necessary workaround.
+   // E.g. assign a[param+i] = b[i] doesn't work, but assign a[i] = b[i-param] does.
+-  `define NR_SOC_TCDM_MASTER_PORTS 5
++  `define NR_SOC_TCDM_MASTER_PORTS 9
+   for (genvar i = 0; i < 4; i++) begin
+     `TCDM_ASSIGN_INTF(master_ports[`NR_SOC_TCDM_MASTER_PORTS + i], axi_bridge_2_interconnect[i])
+   end
+@@ -190,19 +205,20 @@ module soc_interconnect_wrap
+     .AXI_DATA_WIDTH ( 32                                     ),
+     .AXI_ID_WIDTH   ( pkg_soc_interconnect::AXI_ID_OUT_WIDTH ),
+     .AXI_USER_WIDTH ( AXI_USER_WIDTH                         )
+-  ) axi_slaves[2]();
++  ) axi_slaves[3]();
+ 
+   `AXI_ASSIGN(axi_slave_plug, axi_slaves[0])
+   `AXI_ASSIGN(axi_to_axi_lite_bridge, axi_slaves[1])
++  `AXI_ASSIGN(axi_ddr_plug, axi_slaves[2])
+ 
+   //Interconnect instantiation
+   soc_interconnect #(
+     // FC instructions, FC data, uDMA RX, uDMA TX, debug access, 4 four 64-bit
+     // axi plug
+     .NR_MASTER_PORTS                  ( pkg_soc_interconnect::NR_TCDM_MASTER_PORTS ),
+-    // HWPEs ( PULP accelerators ) only have access to the interleaved memory
+-    // region
+-    .NR_MASTER_PORTS_INTERLEAVED_ONLY ( NR_HWPE_PORTS                              ),
++    // HWPEs now routed through master_ports for full address space (DDR3) access.
++    // Keep 1 dummy interleaved-only port (zero-length arrays not supported).
++    .NR_MASTER_PORTS_INTERLEAVED_ONLY ( 1                                          ),
+     .NR_ADDR_RULES_L2_DEMUX           ( NR_RULES_L2_DEMUX                          ),
+     // Number of interleaved memory banks
+     .NR_SLAVE_PORTS_INTERLEAVED       ( NR_L2_PORTS                                ),
+@@ -212,7 +228,7 @@ module soc_interconnect_wrap
+     .NR_SLAVE_PORTS_CONTIG            ( 3                                          ),
+     .NR_ADDR_RULES_SLAVE_PORTS_CONTIG ( NR_RULES_CONTIG_CROSSBAR                   ),
+     // 1 for AXI to cluster, 1 for SoC peripherals ( converted to APB )
+-    .NR_AXI_SLAVE_PORTS               ( 2                                          ),
++    .NR_AXI_SLAVE_PORTS               ( 3                                          ),
+     .NR_ADDR_RULES_AXI_SLAVE_PORTS    ( NR_RULES_AXI_CROSSBAR                      ),
+     // Doesn't need to be changed. All axi masters in the current interconnect
+     // come from a TCDM protocol converter and thus do not have and AXI ID.
+@@ -225,7 +241,7 @@ module soc_interconnect_wrap
+     .rst_ni,
+     .test_en_i,
+     .master_ports                  ( master_ports              ),
+-    .master_ports_interleaved_only ( tcdm_hwpe                 ),
++    .master_ports_interleaved_only ( tcdm_hwpe_dummy            ),
+     .addr_space_l2_demux           ( L2_DEMUX_RULES            ),
+     .addr_space_interleaved        ( INTERLEAVED_ADDR_SPACE    ),
+     .interleaved_slaves            ( l2_interleaved_slaves     ),

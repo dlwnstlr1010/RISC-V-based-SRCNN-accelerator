@@ -1,0 +1,1003 @@
+diff --git a/rtl/fc/fc_hwpe.sv b/rtl/fc/fc_hwpe.sv
+index bd228f4..db77637 100644
+--- a/rtl/fc/fc_hwpe.sv
++++ b/rtl/fc/fc_hwpe.sv
+@@ -8,6 +8,18 @@
+ // CONDITIONS OF ANY KIND, either express or implied. See the License for the
+ // specific language governing permissions and limitations under the License.
+ 
++// ============================================================
++// fc_hwpe.sv  —  SRCNN HWPE Top-Level (3-port addr_gen)
++//
++// TCDM port assignment:
++//   Port 0  addr_gen port 0  (kr=0 read)          — always
++//   Port 1  weight_buf read  (LOAD_W phase)
++//           addr_gen port 1  (kr=1 read, RUN phase) — muxed
++//   Port 2  post_proc write                        — always
++//   Port 3  addr_gen port 2  (kr=2 read, RUN phase)
++//
++// CSR Map: see REG_* below
++// ============================================================
+ 
+ module fc_hwpe
+ #(
+@@ -24,30 +36,51 @@ module fc_hwpe
+   APB.Slave            hwacc_cfg_slave,
+ 
+   output logic [1:0]   evt_o,
+-  output logic         busy_o
+-);
++  output logic         busy_o,
+ 
+-  logic [N_MASTER_PORT-1:0]          tcdm_req;
+-  logic [N_MASTER_PORT-1:0]          tcdm_gnt;
+-  logic [N_MASTER_PORT-1:0] [32-1:0] tcdm_add;
+-  logic [N_MASTER_PORT-1:0]          tcdm_wen;
+-  logic [N_MASTER_PORT-1:0] [4 -1:0] tcdm_be;
+-  logic [N_MASTER_PORT-1:0] [32-1:0] tcdm_wdata;
+-  logic [N_MASTER_PORT-1:0] [32-1:0] tcdm_r_rdata;
+-  logic [N_MASTER_PORT-1:0]          tcdm_r_valid;
++  // ── 128-bit AXI Master for DDR3 burst DMA ──
++  output logic [31:0]  hwpe_axi_ar_addr_o,
++  output logic [7:0]   hwpe_axi_ar_len_o,
++  output logic [2:0]   hwpe_axi_ar_size_o,
++  output logic [1:0]   hwpe_axi_ar_burst_o,
++  output logic         hwpe_axi_ar_valid_o,
++  input  logic         hwpe_axi_ar_ready_i,
++  input  logic [255:0] hwpe_axi_r_data_i,
++  input  logic [1:0]   hwpe_axi_r_resp_i,
++  input  logic         hwpe_axi_r_last_i,
++  input  logic         hwpe_axi_r_valid_i,
++  output logic         hwpe_axi_r_ready_o,
++  output logic [31:0]  hwpe_axi_aw_addr_o,
++  output logic [7:0]   hwpe_axi_aw_len_o,
++  output logic [2:0]   hwpe_axi_aw_size_o,
++  output logic [1:0]   hwpe_axi_aw_burst_o,
++  output logic         hwpe_axi_aw_valid_o,
++  input  logic         hwpe_axi_aw_ready_i,
++  output logic [255:0] hwpe_axi_w_data_o,
++  output logic [31:0]  hwpe_axi_w_strb_o,
++  output logic         hwpe_axi_w_last_o,
++  output logic         hwpe_axi_w_valid_o,
++  input  logic         hwpe_axi_w_ready_i,
++  input  logic [1:0]   hwpe_axi_b_resp_i,
++  input  logic         hwpe_axi_b_valid_i,
++  output logic         hwpe_axi_b_ready_o
++);
+ 
++  // ── APB→peripheral bridge ────────────────────────────────────────────
+   logic                periph_req;
+   logic                periph_gnt;
+-  logic [32-1:0]       periph_add;
++  logic [31:0]         periph_add;
+   logic                periph_we;
+-  logic [4 -1:0]       periph_be;
+-  logic [32-1:0]       periph_wdata;
++  logic [3:0]          periph_be;
++  logic [31:0]         periph_wdata;
+   logic [ID_WIDTH-1:0] periph_id;
+-  logic [32-1:0]       periph_r_rdata;
++  logic [31:0]         periph_r_rdata;
+   logic                periph_r_valid;
++  logic                periph_r_opc;
+   logic [ID_WIDTH-1:0] periph_r_id;
+ 
+-  logic [3:0]          s_evt;
++  assign periph_gnt   = 1'b1;
++  assign periph_r_opc = 1'b0;
+ 
+   apb2per #(
+     .PER_ADDR_WIDTH ( 32             ),
+@@ -74,48 +107,873 @@ module fc_hwpe
+     .per_master_r_rdata_i ( periph_r_rdata          )
+   );
+ 
+-  mac_top_wrap #(
+-    .ID  ( ID_WIDTH )
+-  ) i_mac_top_wrap (
+-    .clk_i            ( clk_i          ),
+-    .rst_ni           ( rst_ni         ),
+-    .test_mode_i      ( test_mode_i    ),
+-    .tcdm_req         ( tcdm_req       ),
+-    .tcdm_gnt         ( tcdm_gnt       ),
+-    .tcdm_add         ( tcdm_add       ),
+-    .tcdm_wen         ( tcdm_wen       ),
+-    .tcdm_be          ( tcdm_be        ),
+-    .tcdm_data        ( tcdm_wdata     ),
+-    .tcdm_r_data      ( tcdm_r_rdata   ),
+-    .tcdm_r_valid     ( tcdm_r_valid   ),
+-    .periph_req       ( periph_req     ),
+-    .periph_gnt       ( periph_gnt     ),
+-    .periph_add       ( periph_add     ),
+-    .periph_wen       ( ~periph_we     ),
+-    .periph_be        ( periph_be      ),
+-    .periph_data      ( periph_wdata   ),
+-    .periph_id        ( '0             ),
+-    .periph_r_data    ( periph_r_rdata ),
+-    .periph_r_valid   ( periph_r_valid ),
+-    .periph_r_id      ( periph_r_id    ),
+-    .evt_o            ( s_evt          )
++  // ── TCDM signal arrays (physical ports 0-3) ──────────────────────────
++  logic [N_MASTER_PORT-1:0]          tcdm_req;
++  logic [N_MASTER_PORT-1:0]          tcdm_gnt;
++  logic [N_MASTER_PORT-1:0] [31:0]   tcdm_add;
++  logic [N_MASTER_PORT-1:0]          tcdm_wen;
++  logic [N_MASTER_PORT-1:0] [3:0]    tcdm_be;
++  logic [N_MASTER_PORT-1:0] [31:0]   tcdm_wdata;
++  logic [N_MASTER_PORT-1:0] [31:0]   tcdm_r_rdata;
++  logic [N_MASTER_PORT-1:0]          tcdm_r_valid;
++
++  // ── CSR address map ───────────────────────────────────────────────────
++  localparam logic [11:0] REG_TRIGGER     = 12'h000;
++  localparam logic [11:0] REG_EVT_ENABLE  = 12'h008;
++  localparam logic [11:0] REG_STATUS      = 12'h00C;
++  localparam logic [11:0] REG_SOFT_CLEAR  = 12'h014;
++  localparam logic [11:0] REG_IN_ADDR     = 12'h040;
++  localparam logic [11:0] REG_OUT_ADDR    = 12'h044;
++  localparam logic [11:0] REG_WEIGHT_ADDR = 12'h048;
++  localparam logic [11:0] REG_BIAS_ADDR   = 12'h04C;
++  localparam logic [11:0] REG_IN_CH       = 12'h050;
++  localparam logic [11:0] REG_OUT_CH      = 12'h054;
++  localparam logic [11:0] REG_LAYER_NUM   = 12'h058;
++  localparam logic [11:0] REG_MODE        = 12'h05C;  // 0=Mode A (4x16), 1=Mode B (1x64 remap for out_ch=1)
++  localparam logic [11:0] REG_DDR_ADDR    = 12'h060;  // DDR3 source address for DMA
++  localparam logic [11:0] REG_TILE_LEN    = 12'h064;  // tile length in words (32-bit)
++  localparam logic [11:0] REG_TOTAL_PIX   = 12'h068;  // total pixels per channel (for post_proc ch offset)
++  localparam logic [11:0] REG_BATCH_PIX   = 12'h06C;  // pixels in current batch (for BRAM stride + all_written)
++  localparam logic [11:0] REG_HW_CYCLES   = 12'h080;  // HW cycle counter (S_DMA_LOAD~S_RUN)
++  localparam logic [11:0] REG_IM2COL_ADDR = 12'h084;  // im2col input L2 base address
++  localparam logic [11:0] REG_IM2COL_SIZE = 12'h088;  // {img_h[7:0], img_w[7:0]}
++  localparam logic [11:0] REG_IM2COL_BSTART = 12'h08C; // im2col batch start pixel index
++  // Per-FSM-state cycle counters (for deep profiling)
++  localparam logic [11:0] REG_CNT_IM2COL  = 12'h090;  // cycles in S_IM2COL
++  localparam logic [11:0] REG_CNT_DMA     = 12'h094;  // cycles in S_DMA_LOAD
++  localparam logic [11:0] REG_CNT_LOADW   = 12'h098;  // cycles in S_LOAD_W
++  localparam logic [11:0] REG_CNT_RUN     = 12'h09C;  // cycles in S_RUN
++  // Sub-state counters
++  localparam logic [11:0] REG_CNT_SYS     = 12'h0A0;  // cycles systolic is computing (sa_busy)
++  localparam logic [11:0] REG_CNT_PP      = 12'h0A4;  // cycles post_proc is writing (sa_writing)
++  localparam logic [11:0] REG_DEBUG0      = 12'h070;  // debug: top_q[2:0], dma_state[2:0], axi signals
++  localparam logic [11:0] REG_DEBUG1      = 12'h074;  // debug: sa_writing, wr_cnt, etc.
++  localparam logic [11:0] REG_DEBUG2      = 12'h078;  // debug: sa_acc[0][0] (systolic result ch0, pix0)
++  localparam logic [11:0] REG_DEBUG3      = 12'h07C;  // debug: out_addr_q (where post_proc writes)
++
++  // ── CSR registers ─────────────────────────────────────────────────────
++  logic [31:0] in_addr_q,  out_addr_q;
++  logic [31:0] weight_addr_q, bias_addr_q;
++  logic [4:0]  in_ch_q;                  // up to 16
++  logic [2:0]  out_ch_q;                 // up to 4 (SW multi-pass for >4)
++  logic [1:0]  layer_num_q;
++  logic        mode_b_q;                 // 0=Mode A, 1=Mode B (1x64 remap)
++  logic [31:0] ddr_addr_q;     // DDR3 DMA source address
++  logic [15:0] tile_len_q;     // tile length in 32-bit words
++  logic [15:0] total_pix_q;   // total pixels per channel (for post_proc ch offset)
++  logic [15:0] batch_pix_q;   // pixels in current batch (for BRAM stride + all_written)
++  logic        evt_en_q;
++  logic        done_q;
++  logic        start_pulse;
++  logic        evt_pulse_q;
++  logic [31:0] periph_rdata_d;
++  logic [31:0] hw_cycle_cnt_q;    // HW-only cycle counter (all states)
++  logic [31:0] cnt_im2col_q;      // cycles in S_IM2COL
++  logic [31:0] cnt_dma_q;         // cycles in S_DMA_LOAD
++  logic [31:0] cnt_loadw_q;       // cycles in S_LOAD_W
++  logic [31:0] cnt_run_q;         // cycles in S_RUN
++  logic [31:0] cnt_sys_q;         // cycles systolic is busy (sub-state of S_RUN)
++  logic [31:0] cnt_pp_q;          // cycles post_proc is writing (sub-state of S_RUN)
++  logic [31:0] im2col_addr_q;  // im2col input L2 base
++  logic [7:0]  im2col_img_w_q; // image width
++  logic [7:0]  im2col_img_h_q; // image height
++  logic [15:0] im2col_bstart_q; // batch start pixel
++
++  // ── Top-level FSM ─────────────────────────────────────────────────────
++  typedef enum logic [2:0] { S_IDLE, S_IM2COL, S_DMA_LOAD, S_LOAD_W, S_RUN, S_DONE } top_e;
++  top_e top_q, top_d;
++
++  logic [15:0] wr_cnt_q;
++  logic        all_written;
++  assign all_written = (wr_cnt_q >= batch_pix_q);
++
++  // ── DMA engine (DDR3 → TCDM via TCDM port 3) ────────────────────────
++  // Reads tile_len_q words from ddr_addr_q (DDR3) and writes to in_addr_q (L2/TCDM)
++  logic [31:0] dma_src_addr_q;   // current DDR3 read address
++  logic [31:0] dma_dst_addr_q;   // current L2 write address
++  logic [15:0] dma_cnt_q;        // words remaining
++  logic        dma_done;
++  assign dma_done = (dma_cnt_q == '0);
++
++  // DMA uses TCDM port 3 for reads (DDR3) and port 0 for writes (L2)
++  // During S_DMA_LOAD: port 3 reads from DDR3, port 0 writes to L2
++  logic        dma_rd_req;
++  logic [31:0] dma_rd_addr;
++  logic        dma_rd_gnt;
++  logic [31:0] dma_rd_rdata;
++  logic        dma_rd_valid;
++
++  logic        dma_wr_req;
++  logic [31:0] dma_wr_addr;
++  logic [31:0] dma_wr_wdata;
++  logic        dma_wr_gnt;
++
++  // DMA read state machine (simple 2-phase: read → write)
++  typedef enum logic [1:0] { DMA_RD, DMA_WR_WAIT, DMA_WR } dma_phase_e;
++  dma_phase_e dma_phase_q, dma_phase_d;
++  logic [31:0] dma_rdata_buf_q;  // buffer for read data
++
++  // ── Submodule control ─────────────────────────────────────────────────
++  logic wbuf_load_start, wbuf_load_done;
++  logic agen_start;
++  logic mac_valid;
++  logic write_done;
++
++  // Weight buffer loading starts when FSM enters S_LOAD_W (after AXI DMA completes)
++  // Old: started during S_DMA_LOAD when old TCDM DMA was done — caused port conflict
++  assign wbuf_load_start = (top_q == S_DMA_LOAD && top_d == S_LOAD_W);
++  // agen_start disabled — addr_gen output unused in DDR3-direct design, and its TCDM
++  // activity was starving CPU arbitration
++  assign agen_start      = 1'b0;
++
++  // ── Submodule inter-connect ───────────────────────────────────────────
++  localparam int MAX_OUT_CH = 4;
++  localparam int K_MAX      = 144;  // up to in_ch=16 × kernel 9
++  localparam int AGEN_K_MAX = 36;   // addr_gen legacy size (MAX_OUT_CH=4 × 3 × 3)
++  localparam int AGEN_PORTS = 3;
++
++  logic signed [15:0] win_buf    [AGEN_K_MAX-1:0];  // legacy addr_gen output (unused by systolic)
++  logic               win_valid;
++  logic [7:0]         agen_row,  agen_col;
++  logic [7:0]         mac_row,   mac_col;
++  logic signed [15:0] weight_out [MAX_OUT_CH-1:0][K_MAX-1:0];
++  logic signed [15:0] bias_out   [MAX_OUT_CH-1:0];
++  logic signed [31:0] acc_out    [MAX_OUT_CH-1:0];
++
++  // ── addr_gen TCDM (3 logical ports) ───────────────────────────────────
++  logic [AGEN_PORTS-1:0]        agen_tcdm_req;
++  logic [AGEN_PORTS-1:0][31:0]  agen_tcdm_add;
++  logic [AGEN_PORTS-1:0][3:0]   agen_tcdm_be;
++  logic [AGEN_PORTS-1:0]        agen_tcdm_wen;
++  logic [AGEN_PORTS-1:0]        agen_tcdm_gnt;
++  logic [AGEN_PORTS-1:0][31:0]  agen_tcdm_r_rdata;
++  logic [AGEN_PORTS-1:0]        agen_tcdm_r_valid;
++
++  // ── weight_buf TCDM ───────────────────────────────────────────────────
++  logic        wbuf_tcdm_req;
++  logic [31:0] wbuf_tcdm_add;
++  logic [3:0]  wbuf_tcdm_be;
++  logic        wbuf_tcdm_wen;
++  logic        wbuf_tcdm_gnt;
++  logic [31:0] wbuf_tcdm_r_rdata;
++  logic        wbuf_tcdm_r_valid;
++
++  // ── post_proc AXI write ───────────────────────────────────────────────
++  logic [31:0]  pp_axi_aw_addr;
++  logic [7:0]   pp_axi_aw_len;
++  logic [2:0]   pp_axi_aw_size;
++  logic [1:0]   pp_axi_aw_burst;
++  logic         pp_axi_aw_valid;
++  logic         pp_axi_aw_ready;
++  logic [255:0] pp_axi_w_data;
++  logic [31:0]  pp_axi_w_strb;
++  logic         pp_axi_w_last;
++  logic         pp_axi_w_valid;
++  logic         pp_axi_w_ready;
++  logic [1:0]   pp_axi_b_resp;
++  logic         pp_axi_b_valid;
++  logic         pp_axi_b_ready;
++
++  // ── im2col AXI read (input from DDR3) ────────────────────────────────
++  logic [31:0]  im2col_axi_ar_addr;
++  logic [7:0]   im2col_axi_ar_len;
++  logic [2:0]   im2col_axi_ar_size;
++  logic [1:0]   im2col_axi_ar_burst;
++  logic         im2col_axi_ar_valid;
++  logic         im2col_axi_ar_ready;
++  logic [255:0] im2col_axi_r_data;
++  logic         im2col_axi_r_last;
++  logic         im2col_axi_r_valid;
++  logic         im2col_axi_r_ready;
++
++  // ── im2col AXI write (im2col matrix to DDR3) ─────────────────────────
++  logic [31:0]  im2col_axi_aw_addr;
++  logic [7:0]   im2col_axi_aw_len;
++  logic [2:0]   im2col_axi_aw_size;
++  logic [1:0]   im2col_axi_aw_burst;
++  logic         im2col_axi_aw_valid;
++  logic         im2col_axi_aw_ready;
++  logic [255:0] im2col_axi_w_data;
++  logic [31:0]  im2col_axi_w_strb;
++  logic         im2col_axi_w_last;
++  logic         im2col_axi_w_valid;
++  logic         im2col_axi_w_ready;
++  logic [1:0]   im2col_axi_b_resp;
++  logic         im2col_axi_b_valid;
++  logic         im2col_axi_b_ready;
++
++  // ── Module instances ──────────────────────────────────────────────────
++
++  hwpe_weight_buf #(
++    .MAX_OUT_CH ( MAX_OUT_CH ),
++    .K_MAX      ( K_MAX      )
++  ) i_weight_buf (
++    .clk_i              ( clk_i             ),
++    .rst_ni             ( rst_ni            ),
++    .load_start_i       ( wbuf_load_start   ),
++    .weight_base_addr_i ( weight_addr_q     ),
++    .bias_base_addr_i   ( bias_addr_q       ),
++    .out_ch_i           ( out_ch_q          ),
++    .in_ch_i            ( in_ch_q           ),
++    .tcdm_req_o         ( wbuf_tcdm_req     ),
++    .tcdm_add_o         ( wbuf_tcdm_add     ),
++    .tcdm_be_o          ( wbuf_tcdm_be      ),
++    .tcdm_wen_o         ( wbuf_tcdm_wen     ),
++    .tcdm_gnt_i         ( wbuf_tcdm_gnt     ),
++    .tcdm_r_rdata_i     ( wbuf_tcdm_r_rdata ),
++    .tcdm_r_valid_i     ( wbuf_tcdm_r_valid ),
++    .weight_o           ( weight_out        ),
++    .bias_o             ( bias_out          ),
++    .load_done_o        ( wbuf_load_done    )
++  );
++
++  hwpe_addr_gen #(
++    .IMG_W     ( 150        ),
++    .IMG_H     ( 150        ),
++    .KS        ( 3          ),
++    .MAX_IN_CH ( MAX_OUT_CH ),
++    .N_PORTS   ( AGEN_PORTS )
++  ) i_addr_gen (
++    .clk_i          ( clk_i              ),
++    .rst_ni         ( rst_ni             ),
++    .start_i        ( agen_start         ),
++    .in_base_addr_i ( in_addr_q          ),
++    .in_ch_i        ( in_ch_q[2:0]       ),  // legacy 3-bit port, addr_gen output unused
++    .tcdm_req_o     ( agen_tcdm_req      ),
++    .tcdm_add_o     ( agen_tcdm_add      ),
++    .tcdm_be_o      ( agen_tcdm_be       ),
++    .tcdm_wen_o     ( agen_tcdm_wen      ),
++    .tcdm_gnt_i     ( agen_tcdm_gnt      ),
++    .tcdm_r_rdata_i ( agen_tcdm_r_rdata  ),
++    .tcdm_r_valid_i ( agen_tcdm_r_valid  ),
++    .win_buf_o      ( win_buf            ),
++    .win_valid_o    ( win_valid           ),
++    .out_row_o      ( agen_row           ),
++    .out_col_o      ( agen_col           ),
++    .done_o         (                    )
++  );
++
++  // hwpe_mac_array removed — replaced by hwpe_systolic_array (see below)
++  assign mac_row = '0;
++  assign mac_col = '0;
++
++  // Pixel index for post_proc:
++  //   Mode A: tile_q * 16  (tile base only — post_proc tracks fill slot itself)
++  //   Mode B: tile_q * 64
++  logic [15:0] pp_pixel_idx;
++  assign pp_pixel_idx = mode_b_q ? ({6'b0, tile_q} << 6) : ({6'b0, tile_q} << 4);
++
++  hwpe_post_proc #(
++    .FIXED_BITS     ( 8          ),
++    .MAX_OUT_CH     ( MAX_OUT_CH ),
++    .AXI_ADDR_WIDTH ( 32         ),
++    .AXI_DATA_WIDTH ( 256        )
++  ) i_post_proc (
++    .clk_i           ( clk_i          ),
++    .rst_ni          ( rst_ni         ),
++    .acc_i           ( acc_out        ),
++    .mac_valid_i     ( mac_valid      ),
++    .pixel_idx_i     ( pp_pixel_idx   ),
++    .bias_i          ( bias_out       ),
++    .out_base_addr_i ( out_addr_q     ),
++    .out_ch_i        ( out_ch_q       ),
++    .layer_num_i     ( layer_num_q    ),
++    .total_pix_i     ( total_pix_q    ),
++    .mode_b_i        ( mode_b_q       ),
++    .axi_aw_addr_o   ( pp_axi_aw_addr  ),
++    .axi_aw_len_o    ( pp_axi_aw_len   ),
++    .axi_aw_size_o   ( pp_axi_aw_size  ),
++    .axi_aw_burst_o  ( pp_axi_aw_burst ),
++    .axi_aw_valid_o  ( pp_axi_aw_valid ),
++    .axi_aw_ready_i  ( pp_axi_aw_ready ),
++    .axi_w_data_o    ( pp_axi_w_data   ),
++    .axi_w_strb_o    ( pp_axi_w_strb   ),
++    .axi_w_last_o    ( pp_axi_w_last   ),
++    .axi_w_valid_o   ( pp_axi_w_valid  ),
++    .axi_w_ready_i   ( pp_axi_w_ready  ),
++    .axi_b_resp_i    ( pp_axi_b_resp   ),
++    .axi_b_valid_i   ( pp_axi_b_valid  ),
++    .axi_b_ready_o   ( pp_axi_b_ready  ),
++    .write_done_o    ( write_done     )
+   );
+-  assign busy_o = 1'b1;
+-  assign evt_o = s_evt[0];
+ 
+-  genvar i;
++  // ── TCDM Port Muxing (DDR3-direct: im2col/post_proc freed) ──────────
++  //  Port 0: addr_gen port 0 (RUN)  [legacy, unused by systolic]
++  //  Port 1: weight_buf (LOAD_W) / addr_gen port 1 (RUN)
++  //  Port 2: (freed — was post_proc, now AXI)
++  //  Port 3: addr_gen port 2 (RUN)
++  logic is_im2col;
++  logic is_load_w;
++  logic is_dma;
++  assign is_im2col = (top_q == S_IM2COL);
++  assign is_load_w = (top_q == S_LOAD_W);
++  assign is_dma    = (top_q == S_DMA_LOAD);
++
++  // --- Port 0: addr_gen (legacy) ---
++  assign tcdm_req  [0] = agen_tcdm_req [0];
++  assign tcdm_add  [0] = agen_tcdm_add [0];
++  assign tcdm_be   [0] = agen_tcdm_be  [0];
++  assign tcdm_wen  [0] = agen_tcdm_wen [0];
++  assign tcdm_wdata[0] = '0;
++  assign agen_tcdm_gnt    [0] = tcdm_gnt    [0];
++  assign agen_tcdm_r_rdata[0] = tcdm_r_rdata[0];
++  assign agen_tcdm_r_valid[0] = tcdm_r_valid[0];
++
++  // --- Port 1: muxed weight_buf / addr_gen port 1 ---
++  assign tcdm_req  [1] = is_load_w ? wbuf_tcdm_req : agen_tcdm_req [1];
++  assign tcdm_add  [1] = is_load_w ? wbuf_tcdm_add : agen_tcdm_add [1];
++  assign tcdm_be   [1] = is_load_w ? wbuf_tcdm_be  : agen_tcdm_be  [1];
++  assign tcdm_wen  [1] = is_load_w ? wbuf_tcdm_wen : agen_tcdm_wen [1];
++  assign tcdm_wdata[1] = '0;
++
++  assign wbuf_tcdm_gnt       = is_load_w ? tcdm_gnt    [1] : 1'b0;
++  assign wbuf_tcdm_r_rdata   = tcdm_r_rdata[1];
++  assign wbuf_tcdm_r_valid   = is_load_w ? tcdm_r_valid[1] : 1'b0;
++
++  assign agen_tcdm_gnt    [1] = is_load_w ? 1'b0 : tcdm_gnt    [1];
++  assign agen_tcdm_r_rdata[1] = tcdm_r_rdata[1];
++  assign agen_tcdm_r_valid[1] = is_load_w ? 1'b0 : tcdm_r_valid[1];
++
++  // --- Port 2: freed (tied off) ---
++  assign tcdm_req  [2] = 1'b0;
++  assign tcdm_add  [2] = '0;
++  assign tcdm_be   [2] = '0;
++  assign tcdm_wen  [2] = 1'b1;
++  assign tcdm_wdata[2] = '0;
++
++  // --- Port 3: addr_gen port 2 (RUN, legacy) ---
++  assign tcdm_req  [3] = agen_tcdm_req [2];
++  assign tcdm_add  [3] = agen_tcdm_add [2];
++  assign tcdm_be   [3] = agen_tcdm_be  [2];
++  assign tcdm_wen  [3] = agen_tcdm_wen [2];
++  assign tcdm_wdata[3] = '0;
++  assign agen_tcdm_gnt    [2] = tcdm_gnt    [3];
++  assign agen_tcdm_r_rdata[2] = tcdm_r_rdata[3];
++  assign agen_tcdm_r_valid[2] = tcdm_r_valid[3];
++
++  // ── im2col signals ──
++  logic im2col_start;
++  logic im2col_done;
++
++  // im2col start: on trigger only (single batch)
++  assign im2col_start = (top_q == S_IDLE) && start_pulse;
++
++  // ── Top-level FSM ─────────────────────────────────────────────────────
++  // S_IM2COL → S_DMA_LOAD → S_LOAD_W → S_RUN → S_DONE
++  always_comb begin
++    top_d = top_q;
++    unique case (top_q)
++      S_IDLE:     if (start_pulse)    top_d = S_IM2COL;
++      S_IM2COL:   if (im2col_done)    top_d = S_DMA_LOAD;
++      S_DMA_LOAD: if (axi_dma_done)   top_d = S_LOAD_W;
++      S_LOAD_W:   if (wbuf_load_done) top_d = S_RUN;
++      S_RUN:      if (all_written)    top_d = S_DONE;
++      S_DONE:     top_d = S_IDLE;
++      default:    top_d = S_IDLE;
++    endcase
++  end
++
++  // ── APB CSR read/write ────────────────────────────────────────────────
++  always_comb begin
++    start_pulse    = 1'b0;
++    periph_rdata_d = 32'h0;
++
++    if (periph_req && periph_we) begin
++      unique case (periph_add[11:0])
++        REG_TRIGGER:     start_pulse = periph_wdata[0];
++        default: ;
++      endcase
++    end
++
++    if (periph_req && !periph_we) begin
++      unique case (periph_add[11:0])
++        REG_EVT_ENABLE:  periph_rdata_d = {31'b0, evt_en_q};
++        REG_STATUS:      periph_rdata_d = {30'b0, done_q,
++                                           (top_q != S_IDLE && top_q != S_DONE)};
++        REG_IN_ADDR:     periph_rdata_d = in_addr_q;
++        REG_OUT_ADDR:    periph_rdata_d = out_addr_q;
++        REG_WEIGHT_ADDR: periph_rdata_d = weight_addr_q;
++        REG_BIAS_ADDR:   periph_rdata_d = bias_addr_q;
++        REG_IN_CH:       periph_rdata_d = {27'b0, in_ch_q};
++        REG_OUT_CH:      periph_rdata_d = {29'b0, out_ch_q};
++        REG_LAYER_NUM:   periph_rdata_d = {30'b0, layer_num_q};
++        REG_MODE:        periph_rdata_d = {31'b0, mode_b_q};
++        REG_DDR_ADDR:    periph_rdata_d = ddr_addr_q;
++        REG_TILE_LEN:    periph_rdata_d = {16'b0, tile_len_q};
++        REG_TOTAL_PIX:   periph_rdata_d = {16'b0, total_pix_q};
++        REG_BATCH_PIX:   periph_rdata_d = {16'b0, batch_pix_q};
++        REG_DEBUG0:      periph_rdata_d = {16'b0,
++                                           axi_dma_done,          // bit 15
++                                           axi_dma_buf_ready,     // bit 14
++                                           hwpe_axi_ar_valid_o,   // bit 13
++                                           hwpe_axi_ar_ready_i,   // bit 12
++                                           hwpe_axi_r_valid_i,    // bit 11
++                                           hwpe_axi_r_ready_o,    // bit 10
++                                           hwpe_axi_r_last_i,     // bit 9
++                                           1'b0,                  // bit 8
++                                           2'b0,                  // bits 7:6
++                                           axi_dma_dbg_state,     // bits 5:3 = DMA FSM
++                                           top_q};                // bits 2:0 = top FSM
++        REG_DEBUG1:      periph_rdata_d = {sa_writing_q,            // bit 31
++                                           sa_busy,                 // bit 30
++                                           sa_done,                 // bit 29
++                                           write_done,              // bit 28
++                                           sa_out_idx_q[3:0],       // bits 27:24 (low nibble of 6-bit idx)
++                                           1'b0, sa_out_idx_q[5:4], mode_b_q, 4'b0, // bits 23:16 (mode + idx hi)
++                                           wr_cnt_q};               // bits 15:0
++        REG_DEBUG2:      periph_rdata_d = sa_acc[0][0];              // systolic acc ch0, pix0
++        REG_DEBUG3:      periph_rdata_d = {weight_out[0][2], weight_out[0][0]};  // ch0 w[0] (lo16) and w[2] (hi16)
++        REG_HW_CYCLES:   periph_rdata_d = hw_cycle_cnt_q;
++        REG_CNT_IM2COL:  periph_rdata_d = cnt_im2col_q;
++        REG_CNT_DMA:     periph_rdata_d = cnt_dma_q;
++        REG_CNT_LOADW:   periph_rdata_d = cnt_loadw_q;
++        REG_CNT_RUN:     periph_rdata_d = cnt_run_q;
++        REG_CNT_SYS:     periph_rdata_d = cnt_sys_q;
++        REG_CNT_PP:      periph_rdata_d = cnt_pp_q;
++        REG_IM2COL_ADDR: periph_rdata_d = im2col_addr_q;
++        REG_IM2COL_SIZE: periph_rdata_d = {16'b0, im2col_img_h_q, im2col_img_w_q};
++        REG_IM2COL_BSTART: periph_rdata_d = {16'b0, im2col_bstart_q};
++        default:         periph_rdata_d = 32'h0;
++      endcase
++    end
++  end
++
++  // ── Old TCDM DMA — DISABLED (replaced by AXI burst DMA) ──────────────
++  // All old DMA request signals tied off
++  always_comb begin
++    dma_phase_d  = dma_phase_q;
++    dma_rd_req   = 1'b0;
++    dma_rd_addr  = '0;
++    dma_wr_req   = 1'b0;
++    dma_wr_addr  = '0;
++    dma_wr_wdata = '0;
++  end
++
++  // ── Sequential ────────────────────────────────────────────────────────
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni) begin
++      top_q          <= S_IDLE;
++      wr_cnt_q       <= '0;
++      evt_en_q       <= 1'b0;
++      done_q         <= 1'b0;
++      evt_pulse_q    <= 1'b0;
++      in_addr_q      <= '0;  out_addr_q     <= '0;
++      weight_addr_q  <= '0;  bias_addr_q    <= '0;
++      in_ch_q        <= 5'd1; out_ch_q      <= 3'd4;
++      layer_num_q    <= 2'd1;
++      mode_b_q       <= 1'b0;
++      ddr_addr_q     <= '0;
++      tile_len_q     <= '0;
++      total_pix_q    <= 16'd22500;  // default: 150×150
++      batch_pix_q    <= 16'd22500;  // default: same as total
++      dma_src_addr_q <= '0;
++      dma_dst_addr_q <= '0;
++      dma_cnt_q      <= '0;
++      dma_phase_q    <= DMA_RD;
++      dma_rdata_buf_q <= '0;
++      periph_r_rdata <= '0;
++      periph_r_valid <= 1'b0;
++      hw_cycle_cnt_q <= '0;
++      cnt_im2col_q   <= '0;
++      cnt_dma_q      <= '0;
++      cnt_loadw_q    <= '0;
++      cnt_run_q      <= '0;
++      cnt_sys_q      <= '0;
++      cnt_pp_q       <= '0;
++      im2col_addr_q  <= '0;
++      im2col_img_w_q <= 8'd150;
++      im2col_img_h_q <= 8'd150;
++      im2col_bstart_q <= '0;
++    end else begin
++      top_q       <= top_d;
++      evt_pulse_q <= 1'b0;
++      dma_phase_q <= dma_phase_d;
++
++      // HW cycle counters (reset on TRIGGER, accumulate across tiles within a batch)
++      if (top_q == S_IDLE && start_pulse) begin
++        hw_cycle_cnt_q <= '0;
++        cnt_im2col_q   <= '0;
++        cnt_dma_q      <= '0;
++        cnt_loadw_q    <= '0;
++        cnt_run_q      <= '0;
++        cnt_sys_q      <= '0;
++        cnt_pp_q       <= '0;
++      end else begin
++        // Total HW cycles (all active states)
++        if (top_q == S_IM2COL || top_q == S_DMA_LOAD || top_q == S_LOAD_W || top_q == S_RUN)
++          hw_cycle_cnt_q <= hw_cycle_cnt_q + 32'd1;
++        // Per-state counters
++        if (top_q == S_IM2COL)   cnt_im2col_q <= cnt_im2col_q + 32'd1;
++        if (top_q == S_DMA_LOAD) cnt_dma_q    <= cnt_dma_q    + 32'd1;
++        if (top_q == S_LOAD_W)   cnt_loadw_q  <= cnt_loadw_q  + 32'd1;
++        if (top_q == S_RUN)      cnt_run_q    <= cnt_run_q    + 32'd1;
++        // Sub-state counters (within S_RUN)
++        if (top_q == S_RUN && sa_busy)       cnt_sys_q <= cnt_sys_q + 32'd1;
++        if (top_q == S_RUN && sa_writing_q)  cnt_pp_q  <= cnt_pp_q  + 32'd1;
++      end
++
++      // Old TCDM DMA disabled — AXI burst DMA (hwpe_axi_dma) is used instead
++      // if (top_q == S_IDLE && start_pulse && tile_len_q != '0) begin
++      //   dma_src_addr_q <= ddr_addr_q;
++      //   dma_dst_addr_q <= in_addr_q;
++      //   dma_cnt_q      <= tile_len_q;
++      //   dma_phase_q    <= DMA_RD;
++      // end
++
++      // Old TCDM DMA progress — DISABLED
++      // (AXI burst DMA handles DDR3→BRAM transfer instead)
++
++      // Pixel write counter (counts 16 pixels per systolic tile completion)
++      if (top_q == S_IDLE && start_pulse)
++        wr_cnt_q <= '0;
++      else if (top_q == S_RUN && sa_writing_q && write_done && (sa_out_idx_q == (sa_cols_eff - 7'd1)))
++        wr_cnt_q <= wr_cnt_q + {9'b0, sa_cols_eff};
++
++      // Done + IRQ
++      if (top_q == S_RUN && all_written) begin
++        done_q <= 1'b1;
++        if (evt_en_q) evt_pulse_q <= 1'b1;
++      end
++
++      // APB writes
++      if (periph_req && periph_we) begin
++        unique case (periph_add[11:0])
++          REG_EVT_ENABLE:  evt_en_q      <= periph_wdata[0];
++          REG_SOFT_CLEAR:  if (periph_wdata[0]) done_q <= 1'b0;
++          REG_IN_ADDR:     in_addr_q     <= periph_wdata;
++          REG_OUT_ADDR:    out_addr_q    <= periph_wdata;
++          REG_WEIGHT_ADDR: weight_addr_q <= periph_wdata;
++          REG_BIAS_ADDR:   bias_addr_q   <= periph_wdata;
++          REG_IN_CH:       in_ch_q       <= periph_wdata[4:0];
++          REG_OUT_CH:      out_ch_q      <= periph_wdata[2:0];
++          REG_LAYER_NUM:   layer_num_q   <= periph_wdata[1:0];
++          REG_MODE:        mode_b_q      <= periph_wdata[0];
++          REG_DDR_ADDR:    ddr_addr_q    <= periph_wdata;
++          REG_TILE_LEN:    tile_len_q    <= periph_wdata[15:0];
++          REG_TOTAL_PIX:   total_pix_q   <= periph_wdata[15:0];
++          REG_BATCH_PIX:   batch_pix_q   <= periph_wdata[15:0];
++          REG_IM2COL_ADDR: im2col_addr_q <= periph_wdata;
++          REG_IM2COL_SIZE: begin
++            im2col_img_w_q <= periph_wdata[7:0];
++            im2col_img_h_q <= periph_wdata[15:8];
++          end
++          REG_IM2COL_BSTART: im2col_bstart_q <= periph_wdata[15:0];
++          default: ;
++        endcase
++      end
++
++      // APB read response
++      periph_r_valid <= periph_req;
++      periph_r_rdata <= periph_rdata_d;
++    end
++  end
++
++  // ── Status outputs ────────────────────────────────────────────────────
++  assign busy_o = (top_q == S_DMA_LOAD) || (top_q == S_LOAD_W) || (top_q == S_RUN);
++  assign evt_o  = {1'b0, evt_pulse_q};
++
++  // ── TCDM port binding ─────────────────────────────────────────────────
++  genvar gi;
+   generate
+-    for (i=0;i<4;i++) begin : hwacc_binding
+-      assign hwacc_xbar_master[i].req   = tcdm_req   [i];
+-      assign hwacc_xbar_master[i].add   = tcdm_add   [i];
+-      assign hwacc_xbar_master[i].wen   = tcdm_wen   [i];
+-      assign hwacc_xbar_master[i].wdata = tcdm_wdata [i];
+-      assign hwacc_xbar_master[i].be    = tcdm_be    [i];
+-      // response channel
+-      assign tcdm_gnt     [i] = hwacc_xbar_master[i].gnt;
+-      assign tcdm_r_rdata [i] = hwacc_xbar_master[i].r_rdata;
+-      assign tcdm_r_valid [i] = hwacc_xbar_master[i].r_valid;
++    for (gi = 0; gi < N_MASTER_PORT; gi++) begin : hwacc_binding
++      assign hwacc_xbar_master[gi].req   = tcdm_req   [gi];
++      assign hwacc_xbar_master[gi].add   = tcdm_add   [gi];
++      assign hwacc_xbar_master[gi].wen   = tcdm_wen   [gi];
++      assign hwacc_xbar_master[gi].wdata = tcdm_wdata [gi];
++      assign hwacc_xbar_master[gi].be    = tcdm_be    [gi];
++      assign tcdm_gnt     [gi] = hwacc_xbar_master[gi].gnt;
++      assign tcdm_r_rdata [gi] = hwacc_xbar_master[gi].r_rdata;
++      assign tcdm_r_valid [gi] = hwacc_xbar_master[gi].r_valid;
+     end
+   endgenerate
+ 
+-endmodule // acc_subsystem
++  // ── Systolic Array (4×16 = 64 PEs, mode-aware) ──────────────────────
++  //   Mode A: logical 4 out_ch × 16 pix per tile, 16 pix drain → post_proc.
++  //   Mode B: logical 1 out_ch × 64 pix per tile, 64 pix drain → post_proc.
++  localparam int SA_COLS = 16;
++  localparam int SA_PE_N = MAX_OUT_CH * SA_COLS;     // 64 PEs total
++  logic        sa_start;
++  logic        sa_busy;
++  logic        sa_done;
++  logic [7:0]  sa_inner_dim;                          // up to 144
++  logic [$clog2(K_MAX)-1:0] sa_bram_rd_addr_raw;     // k index from systolic
++  logic [9:0]               sa_bram_rd_addr;          // global BRAM beat address
++  logic [SA_COLS*16-1:0]    sa_act_data;              // 256-bit (Mode A)
++  logic [SA_PE_N*16-1:0]    sa_act_data_wide;         // 1024-bit (Mode B)
++  logic signed [31:0]       sa_acc [MAX_OUT_CH-1:0][SA_COLS-1:0];
++  logic                     sa_valid [MAX_OUT_CH-1:0];
++
++  // Effective pixels per tile per mode.
++  logic [6:0]  sa_cols_eff;    // 16 (Mode A) or 64 (Mode B)
++  logic [1:0]  mode_beat_shift; // 0 (Mode A: 1 beat per tile) or 2 (Mode B: 4 beats per tile)
++  assign sa_cols_eff      = mode_b_q ? 7'd64 : 7'd16;
++  assign mode_beat_shift  = mode_b_q ? 2'd2 : 2'd0;
++
++  // Tile tracking
++  logic [9:0]  tile_q;         // current tile index (counts Mode-A tiles OR Mode-B tiles)
++  logic [9:0]  bram_stride;    // BRAM beats per k-group = ceil(batch_pix/16)
++  logic        tile_done;
++
++  assign bram_stride = {4'b0, batch_pix_q[15:4]} + (|batch_pix_q[3:0] ? 10'd1 : 10'd0);
++  assign sa_inner_dim = {3'b0, in_ch_q} * 8'd9;
++
++  // BRAM global beat address:
++  //   Mode A: tile_q +      k*stride       (1 beat per tile)
++  //   Mode B: tile_q*4 +    k*stride       (4 beats per tile; stride must be multiple of 4)
++  logic [9:0] current_tile;
++  assign current_tile    = (tile_done && top_q == S_RUN) ? (tile_q + 10'd1) : tile_q;
++  assign sa_bram_rd_addr = (current_tile << mode_beat_shift) + sa_bram_rd_addr_raw * bram_stride;
++
++  // tile_done / sa_start: serializer-driven. sa_out_idx_q reaches (sa_cols_eff-1) at tile end.
++  assign tile_done = sa_writing_q && write_done && (sa_out_idx_q == (sa_cols_eff - 7'd1));
++  assign sa_start  = ((top_q == S_LOAD_W) && wbuf_load_done)
++                   || (top_q == S_RUN && tile_done && (wr_cnt_q + {9'b0, sa_cols_eff} < batch_pix_q));
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni)
++      tile_q <= '0;
++    else if (top_q == S_IDLE && start_pulse)
++      tile_q <= '0;
++    else if (top_q == S_RUN && tile_done)
++      tile_q <= tile_q + 10'd1;
++  end
++
++  hwpe_systolic_array #(
++    .N_COLS  ( SA_COLS    ),
++    .N_ROWS  ( MAX_OUT_CH ),
++    .K_MAX   ( K_MAX      )
++  ) i_systolic_array (
++    .clk_i            ( clk_i               ),
++    .rst_ni           ( rst_ni              ),
++    .start_i          ( sa_start            ),
++    .inner_dim_i      ( sa_inner_dim        ),
++    .mode_b_i         ( mode_b_q            ),
++    .busy_o           ( sa_busy             ),
++    .done_o           ( sa_done             ),
++    .bram_rd_addr_o   ( sa_bram_rd_addr_raw ),
++    .act_data_i       ( sa_act_data         ),
++    .act_data_wide_i  ( sa_act_data_wide    ),
++    .weight_i         ( weight_out          ),
++    .acc_o            ( sa_acc              ),
++    .valid_o          ( sa_valid            )
++  );
++
++  // ── Systolic → Post-proc serializer ──────────────────────────────────
++  //   Mode A: sa_out_idx 0..15, feed acc_out[ch=0..3] = sa_acc[ch][idx]
++  //   Mode B: sa_out_idx 0..63, feed acc_out[0]       = sa_acc[idx[5:4]][idx[3:0]]
++  logic [6:0]  sa_out_idx_q;
++  logic        sa_writing_q;
++  logic        sa_fill_active_q;
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni) begin
++      sa_out_idx_q     <= '0;
++      sa_writing_q     <= 1'b0;
++      sa_fill_active_q <= 1'b0;
++    end else begin
++      if (sa_done) begin
++        sa_writing_q     <= 1'b1;
++        sa_fill_active_q <= 1'b1;
++        sa_out_idx_q     <= '0;
++      end else if (sa_fill_active_q) begin
++        if (sa_out_idx_q == (sa_cols_eff - 7'd1)) begin
++          sa_fill_active_q <= 1'b0;
++        end else begin
++          sa_out_idx_q <= sa_out_idx_q + 7'd1;
++        end
++      end
++      if (sa_writing_q && write_done) sa_writing_q <= 1'b0;
++    end
++  end
++
++  logic mac_valid_comb;
++  always_comb begin
++    if (mode_b_q) begin
++      acc_out[0] = sa_acc[sa_out_idx_q[5:4]][sa_out_idx_q[3:0]];
++      acc_out[1] = '0;
++      acc_out[2] = '0;
++      acc_out[3] = '0;
++    end else begin
++      for (int ch = 0; ch < MAX_OUT_CH; ch++)
++        acc_out[ch] = sa_acc[ch][sa_out_idx_q[3:0]];
++    end
++    mac_valid_comb = sa_done || sa_fill_active_q;
++  end
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin
++    if (!rst_ni)
++      mac_valid <= 1'b0;
++    else
++      mac_valid <= mac_valid_comb;
++  end
++
++  // ── AXI burst DMA engine (256-bit, DDR3 read) ──────────────────────
++  logic        axi_dma_start;
++  logic        axi_dma_done;
++  logic        axi_dma_buf_ready;
++  logic [2:0]  axi_dma_dbg_state;
++
++  assign axi_dma_start = (top_q == S_IM2COL) && im2col_done;
++
++  hwpe_axi_dma #(
++    .AXI_ADDR_WIDTH ( 32   ),
++    .AXI_DATA_WIDTH ( 256  ),
++    .AXI_ID_WIDTH   ( 1    ),
++    .BRAM_DEPTH     ( 1024 )
++  ) i_axi_dma (
++    .clk_i          ( clk_i              ),
++    .rst_ni         ( rst_ni             ),
++    .start_i        ( axi_dma_start      ),
++    .src_addr_i     ( ddr_addr_q         ),
++    .num_words_i    ( tile_len_q          ),
++    .done_o         ( axi_dma_done       ),
++    .buf_ready_o    ( axi_dma_buf_ready  ),
++    .dbg_state_o    ( axi_dma_dbg_state  ),
++    .rd_addr_i      ( sa_bram_rd_addr    ),  // systolic array drives BRAM read (global beat idx)
++    .rd_data_o      ( sa_act_data        ),  // 256-bit (Mode A single-bank)
++    .rd_data_wide_o ( sa_act_data_wide   ),  // 1024-bit (Mode B all-bank parallel)
++    // AXI AR (internal signals, muxed at top with im2col AR)
++    .axi_ar_addr_o  ( dma_axi_ar_addr     ),
++    .axi_ar_len_o   ( dma_axi_ar_len      ),
++    .axi_ar_size_o  ( dma_axi_ar_size     ),
++    .axi_ar_burst_o ( dma_axi_ar_burst    ),
++    .axi_ar_valid_o ( dma_axi_ar_valid    ),
++    .axi_ar_ready_i ( dma_axi_ar_ready    ),
++    .axi_ar_lock_o  (                     ),
++    .axi_ar_cache_o (                     ),
++    .axi_ar_prot_o  (                     ),
++    .axi_ar_qos_o   (                     ),
++    .axi_ar_id_o    (                     ),
++    // AXI R (shared read data, but only accepted during S_DMA_LOAD)
++    .axi_r_data_i   ( hwpe_axi_r_data_i   ),
++    .axi_r_resp_i   ( hwpe_axi_r_resp_i   ),
++    .axi_r_last_i   ( hwpe_axi_r_last_i   ),
++    .axi_r_valid_i  ( is_dma ? hwpe_axi_r_valid_i : 1'b0 ),
++    .axi_r_ready_o  ( dma_axi_r_ready     ),
++    .axi_r_id_i     ( 1'b0                ),
++    // AXI AW/W/B — disconnected (im2col module drives these instead)
++    .axi_aw_addr_o  (                     ),
++    .axi_aw_len_o   (                     ),
++    .axi_aw_size_o  (                     ),
++    .axi_aw_burst_o (                     ),
++    .axi_aw_valid_o (                     ),
++    .axi_aw_ready_i ( 1'b0               ),
++    .axi_aw_lock_o  (                     ),
++    .axi_aw_cache_o (                     ),
++    .axi_aw_prot_o  (                     ),
++    .axi_aw_qos_o   (                     ),
++    .axi_aw_id_o    (                     ),
++    .axi_w_data_o   (                     ),
++    .axi_w_strb_o   (                     ),
++    .axi_w_last_o   (                     ),
++    .axi_w_valid_o  (                     ),
++    .axi_w_ready_i  ( 1'b0               ),
++    .axi_b_resp_i   ( 2'b0               ),
++    .axi_b_valid_i  ( 1'b0               ),
++    .axi_b_ready_o  (                     )
++  );
++
++  // ── HW im2col engine (DDR3 AXI read → DDR3 AXI write) ───────────────
++  hwpe_im2col #(
++    .AXI_ADDR_WIDTH ( 32  ),
++    .AXI_DATA_WIDTH ( 256 )
++  ) i_im2col (
++    .clk_i            ( clk_i              ),
++    .rst_ni           ( rst_ni             ),
++    .start_i          ( im2col_start       ),
++    .done_o           ( im2col_done        ),
++    // Configuration
++    .in_base_addr_i   ( im2col_addr_q      ),
++    .in_ch_stride_i   ( total_pix_q        ),
++    .in_ch_i          ( in_ch_q            ),
++    .img_w_i          ( im2col_img_w_q     ),
++    .img_h_i          ( im2col_img_h_q     ),
++    .ddr_dest_addr_i  ( ddr_addr_q         ),
++    .batch_start_i    ( im2col_bstart_q    ),
++    .batch_pix_i      ( batch_pix_q        ),
++    // AXI read (input from DDR3, muxed with DMA at top-level)
++    .axi_ar_addr_o    ( im2col_axi_ar_addr  ),
++    .axi_ar_len_o     ( im2col_axi_ar_len   ),
++    .axi_ar_size_o    ( im2col_axi_ar_size  ),
++    .axi_ar_burst_o   ( im2col_axi_ar_burst ),
++    .axi_ar_valid_o   ( im2col_axi_ar_valid ),
++    .axi_ar_ready_i   ( im2col_axi_ar_ready ),
++    .axi_r_data_i     ( im2col_axi_r_data   ),
++    .axi_r_last_i     ( im2col_axi_r_last   ),
++    .axi_r_valid_i    ( im2col_axi_r_valid  ),
++    .axi_r_ready_o    ( im2col_axi_r_ready  ),
++    // AXI write (im2col matrix to DDR3, muxed with post_proc)
++    .axi_aw_addr_o    ( im2col_axi_aw_addr  ),
++    .axi_aw_len_o     ( im2col_axi_aw_len   ),
++    .axi_aw_size_o    ( im2col_axi_aw_size  ),
++    .axi_aw_burst_o   ( im2col_axi_aw_burst ),
++    .axi_aw_valid_o   ( im2col_axi_aw_valid ),
++    .axi_aw_ready_i   ( im2col_axi_aw_ready ),
++    .axi_w_data_o     ( im2col_axi_w_data   ),
++    .axi_w_strb_o     ( im2col_axi_w_strb   ),
++    .axi_w_last_o     ( im2col_axi_w_last   ),
++    .axi_w_valid_o    ( im2col_axi_w_valid  ),
++    .axi_w_ready_i    ( im2col_axi_w_ready  ),
++    .axi_b_resp_i     ( im2col_axi_b_resp   ),
++    .axi_b_valid_i    ( im2col_axi_b_valid  ),
++    .axi_b_ready_o    ( im2col_axi_b_ready  )
++  );
++
++  // ─────────────────────────────────────────────────────────────────────
++  // AXI top-level mux: share single AXI master between consumers
++  // ─────────────────────────────────────────────────────────────────────
++  //  AR (read): im2col (S_IM2COL) vs DMA (S_DMA_LOAD)
++  //  AW/W/B (write): im2col (S_IM2COL) vs post_proc (S_RUN)
++  //
++  // DMA AR/R signals (internal, wired from hwpe_axi_dma instance)
++  logic [31:0] dma_axi_ar_addr;
++  logic [7:0]  dma_axi_ar_len;
++  logic [2:0]  dma_axi_ar_size;
++  logic [1:0]  dma_axi_ar_burst;
++  logic        dma_axi_ar_valid;
++  logic        dma_axi_ar_ready;
++  logic        dma_axi_r_ready;
++
++  // --- AR mux ---
++  assign hwpe_axi_ar_addr_o  = is_dma ? dma_axi_ar_addr  : im2col_axi_ar_addr;
++  assign hwpe_axi_ar_len_o   = is_dma ? dma_axi_ar_len   : im2col_axi_ar_len;
++  assign hwpe_axi_ar_size_o  = is_dma ? dma_axi_ar_size  : im2col_axi_ar_size;
++  assign hwpe_axi_ar_burst_o = is_dma ? dma_axi_ar_burst : im2col_axi_ar_burst;
++  assign hwpe_axi_ar_valid_o = is_dma ? dma_axi_ar_valid : im2col_axi_ar_valid;
++  assign dma_axi_ar_ready    = is_dma ? hwpe_axi_ar_ready_i : 1'b0;
++  assign im2col_axi_ar_ready = is_dma ? 1'b0              : hwpe_axi_ar_ready_i;
++
++  // --- R demux ---
++  assign im2col_axi_r_data   = hwpe_axi_r_data_i;
++  assign im2col_axi_r_last   = hwpe_axi_r_last_i;
++  assign im2col_axi_r_valid  = is_dma ? 1'b0 : hwpe_axi_r_valid_i;
++  // DMA R path is handled directly in hwpe_axi_dma instance via hwpe_axi_r_* ports
++  //   (see instance wiring above). r_ready routed below.
++  assign hwpe_axi_r_ready_o  = is_dma ? dma_axi_r_ready : im2col_axi_r_ready;
++
++  // --- AW/W/B mux: im2col (S_IM2COL) vs post_proc (S_RUN) ---
++  logic is_run;
++  assign is_run = (top_q == S_RUN);
++
++  assign hwpe_axi_aw_addr_o  = is_run ? pp_axi_aw_addr  : im2col_axi_aw_addr;
++  assign hwpe_axi_aw_len_o   = is_run ? pp_axi_aw_len   : im2col_axi_aw_len;
++  assign hwpe_axi_aw_size_o  = is_run ? pp_axi_aw_size  : im2col_axi_aw_size;
++  assign hwpe_axi_aw_burst_o = is_run ? pp_axi_aw_burst : im2col_axi_aw_burst;
++  assign hwpe_axi_aw_valid_o = is_run ? pp_axi_aw_valid : im2col_axi_aw_valid;
++  assign pp_axi_aw_ready     = is_run ? hwpe_axi_aw_ready_i : 1'b0;
++  assign im2col_axi_aw_ready = is_run ? 1'b0              : hwpe_axi_aw_ready_i;
++
++  assign hwpe_axi_w_data_o   = is_run ? pp_axi_w_data   : im2col_axi_w_data;
++  assign hwpe_axi_w_strb_o   = is_run ? pp_axi_w_strb   : im2col_axi_w_strb;
++  assign hwpe_axi_w_last_o   = is_run ? pp_axi_w_last   : im2col_axi_w_last;
++  assign hwpe_axi_w_valid_o  = is_run ? pp_axi_w_valid  : im2col_axi_w_valid;
++  assign pp_axi_w_ready      = is_run ? hwpe_axi_w_ready_i : 1'b0;
++  assign im2col_axi_w_ready  = is_run ? 1'b0              : hwpe_axi_w_ready_i;
++
++  assign pp_axi_b_resp       = hwpe_axi_b_resp_i;
++  assign pp_axi_b_valid      = is_run ? hwpe_axi_b_valid_i : 1'b0;
++  assign im2col_axi_b_resp   = hwpe_axi_b_resp_i;
++  assign im2col_axi_b_valid  = is_run ? 1'b0              : hwpe_axi_b_valid_i;
++  assign hwpe_axi_b_ready_o  = is_run ? pp_axi_b_ready : im2col_axi_b_ready;
++
++endmodule

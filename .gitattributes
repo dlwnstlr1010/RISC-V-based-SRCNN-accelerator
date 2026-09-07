@@ -1,0 +1,7 @@
+*.bit binary
+*.h text eol=lf
+*.c text eol=lf
+*.sv text eol=lf
+*.diff text eol=lf
+*.py text eol=lf
+*.md text eol=lf

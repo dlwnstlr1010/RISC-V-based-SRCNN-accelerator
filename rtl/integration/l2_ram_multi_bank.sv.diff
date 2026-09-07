@@ -1,0 +1,13 @@
+diff --git a/rtl/pulp_soc/l2_ram_multi_bank.sv b/rtl/pulp_soc/l2_ram_multi_bank.sv
+index f1933b3..4eebf3f 100644
+--- a/rtl/pulp_soc/l2_ram_multi_bank.sv
++++ b/rtl/pulp_soc/l2_ram_multi_bank.sv
+@@ -12,7 +12,7 @@
+ 
+ module l2_ram_multi_bank #(
+   parameter NB_BANKS                   = 4,
+-  parameter int unsigned BANK_SIZE_INTL_SRAM = 16384 //Number of 32-bit words
++  parameter int unsigned BANK_SIZE_INTL_SRAM = 32768 //Number of 32-bit words
+ ) (
+   input logic             clk_i,
+   input logic             rst_ni,

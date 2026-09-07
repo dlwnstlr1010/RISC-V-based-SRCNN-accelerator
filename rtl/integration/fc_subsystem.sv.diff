@@ -1,0 +1,120 @@
+diff --git a/rtl/fc/fc_subsystem.sv b/rtl/fc/fc_subsystem.sv
+index ef55c75..52121d3 100644
+--- a/rtl/fc/fc_subsystem.sv
++++ b/rtl/fc/fc_subsystem.sv
+@@ -46,17 +46,51 @@ module fc_subsystem import cv32e40p_apu_core_pkg::*; #(
+   input  logic [31:0]               interrupts_i, // goes directly to core interrupt, should be called irqs
+   output logic [1:0]                hwpe_events_o,
+ 
+-  output logic                      supervisor_mode_o
++  output logic                      supervisor_mode_o,
++
++  // HWPE AXI master port (128-bit, read-only + tied-off write)
++  // AXI AR channel
++  output logic [31:0]               hwpe_axi_ar_addr_o,
++  output logic [7:0]                hwpe_axi_ar_len_o,
++  output logic [2:0]                hwpe_axi_ar_size_o,
++  output logic [1:0]                hwpe_axi_ar_burst_o,
++  output logic                      hwpe_axi_ar_valid_o,
++  input  logic                      hwpe_axi_ar_ready_i,
++  // AXI R channel
++  input  logic [255:0]              hwpe_axi_r_data_i,
++  input  logic [1:0]                hwpe_axi_r_resp_i,
++  input  logic                      hwpe_axi_r_last_i,
++  input  logic                      hwpe_axi_r_valid_i,
++  output logic                      hwpe_axi_r_ready_o,
++  // AXI AW channel (tied off)
++  output logic [31:0]               hwpe_axi_aw_addr_o,
++  output logic [7:0]                hwpe_axi_aw_len_o,
++  output logic [2:0]                hwpe_axi_aw_size_o,
++  output logic [1:0]                hwpe_axi_aw_burst_o,
++  output logic                      hwpe_axi_aw_valid_o,
++  input  logic                      hwpe_axi_aw_ready_i,
++  // AXI W channel (tied off)
++  output logic [255:0]              hwpe_axi_w_data_o,
++  output logic [31:0]               hwpe_axi_w_strb_o,
++  output logic                      hwpe_axi_w_last_o,
++  output logic                      hwpe_axi_w_valid_o,
++  input  logic                      hwpe_axi_w_ready_i,
++  // AXI B channel (tied off)
++  input  logic [1:0]                hwpe_axi_b_resp_i,
++  input  logic                      hwpe_axi_b_valid_i,
++  output logic                      hwpe_axi_b_ready_o
+ );
+ 
+-  localparam USE_IBEX   = CORE_TYPE == 1 || CORE_TYPE == 2;
+-  localparam IBEX_RV32M = CORE_TYPE == 1 ? ibex_pkg::RV32MFast : ibex_pkg::RV32MNone;
+-  localparam IBEX_RV32E = CORE_TYPE == 2;
++  localparam bit USE_IBEX = CORE_TYPE == 1 || CORE_TYPE == 2;
++  localparam ibex_pkg::rv32m_e IBEX_RV32M =
++      CORE_TYPE == 1 ? ibex_pkg::RV32MFast : ibex_pkg::RV32MNone;
++  localparam bit IBEX_RV32E = CORE_TYPE == 2;
+ 
+   // Set register file for ibex based on bender targets.
+   //     Default to FF for simulation, use FGPA for FPGA, use Latch for synthesis.
+   //     Override by setting bender targets (`-t ibex_use_ff_regfile`) or defines below
+-  localparam IBEX_RegFile =   `ifdef TARGET_IBEX_USE_FPGA_REGFILE  ibex_pkg::RegFileFPGA;  `else // Override FPGA
++  localparam ibex_pkg::regfile_e IBEX_RegFile =
++                `ifdef TARGET_IBEX_USE_FPGA_REGFILE  ibex_pkg::RegFileFPGA;  `else // Override FPGA
+                 `ifdef TARGET_IBEX_USE_LATCH_REGFILE ibex_pkg::RegFileLatch; `else // Override Latch
+                 `ifdef TARGET_IBEX_USE_FF_REGFILE    ibex_pkg::RegFileFF;    `else // Override FF
+                 `ifdef TARGET_FPGA                   ibex_pkg::RegFileFPGA;  `else // FPGA
+@@ -367,7 +401,33 @@ module fc_subsystem import cv32e40p_apu_core_pkg::*; #(
+       .hwacc_xbar_master ( l2_hwpe_master ),
+       .hwacc_cfg_slave   ( apb_slave_hwpe ),
+       .evt_o             ( hwpe_events_o  ),
+-      .busy_o            (                )
++      .busy_o            (                ),
++      // HWPE AXI master port
++      .hwpe_axi_ar_addr_o  ( hwpe_axi_ar_addr_o  ),
++      .hwpe_axi_ar_len_o   ( hwpe_axi_ar_len_o   ),
++      .hwpe_axi_ar_size_o  ( hwpe_axi_ar_size_o  ),
++      .hwpe_axi_ar_burst_o ( hwpe_axi_ar_burst_o ),
++      .hwpe_axi_ar_valid_o ( hwpe_axi_ar_valid_o ),
++      .hwpe_axi_ar_ready_i ( hwpe_axi_ar_ready_i ),
++      .hwpe_axi_r_data_i   ( hwpe_axi_r_data_i   ),
++      .hwpe_axi_r_resp_i   ( hwpe_axi_r_resp_i   ),
++      .hwpe_axi_r_last_i   ( hwpe_axi_r_last_i   ),
++      .hwpe_axi_r_valid_i  ( hwpe_axi_r_valid_i  ),
++      .hwpe_axi_r_ready_o  ( hwpe_axi_r_ready_o  ),
++      .hwpe_axi_aw_addr_o  ( hwpe_axi_aw_addr_o  ),
++      .hwpe_axi_aw_len_o   ( hwpe_axi_aw_len_o   ),
++      .hwpe_axi_aw_size_o  ( hwpe_axi_aw_size_o  ),
++      .hwpe_axi_aw_burst_o ( hwpe_axi_aw_burst_o ),
++      .hwpe_axi_aw_valid_o ( hwpe_axi_aw_valid_o ),
++      .hwpe_axi_aw_ready_i ( hwpe_axi_aw_ready_i ),
++      .hwpe_axi_w_data_o   ( hwpe_axi_w_data_o   ),
++      .hwpe_axi_w_strb_o   ( hwpe_axi_w_strb_o   ),
++      .hwpe_axi_w_last_o   ( hwpe_axi_w_last_o   ),
++      .hwpe_axi_w_valid_o  ( hwpe_axi_w_valid_o  ),
++      .hwpe_axi_w_ready_i  ( hwpe_axi_w_ready_i  ),
++      .hwpe_axi_b_resp_i   ( hwpe_axi_b_resp_i   ),
++      .hwpe_axi_b_valid_i  ( hwpe_axi_b_valid_i  ),
++      .hwpe_axi_b_ready_o  ( hwpe_axi_b_ready_o  )
+     );
+   end
+   else begin : no_fc_hwpe_gen
+@@ -382,6 +442,23 @@ module fc_subsystem import cv32e40p_apu_core_pkg::*; #(
+       assign l2_hwpe_master[ii].be    = '0;
+       assign l2_hwpe_master[ii].add   = '0;
+     end
++    // Tie off HWPE AXI master outputs when no HWPE
++    assign hwpe_axi_ar_addr_o  = '0;
++    assign hwpe_axi_ar_len_o   = '0;
++    assign hwpe_axi_ar_size_o  = '0;
++    assign hwpe_axi_ar_burst_o = '0;
++    assign hwpe_axi_ar_valid_o = '0;
++    assign hwpe_axi_r_ready_o  = '0;
++    assign hwpe_axi_aw_addr_o  = '0;
++    assign hwpe_axi_aw_len_o   = '0;
++    assign hwpe_axi_aw_size_o  = '0;
++    assign hwpe_axi_aw_burst_o = '0;
++    assign hwpe_axi_aw_valid_o = '0;
++    assign hwpe_axi_w_data_o   = '0;
++    assign hwpe_axi_w_strb_o   = '0;
++    assign hwpe_axi_w_last_o   = '0;
++    assign hwpe_axi_w_valid_o  = '0;
++    assign hwpe_axi_b_ready_o  = '0;
+   end
+ 
+ 

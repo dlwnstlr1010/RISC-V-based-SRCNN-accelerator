@@ -1,0 +1,214 @@
+diff --git a/rtl/pulp_soc/pulp_soc.sv b/rtl/pulp_soc/pulp_soc.sv
+index 6565584..6a00ad0 100644
+--- a/rtl/pulp_soc/pulp_soc.sv
++++ b/rtl/pulp_soc/pulp_soc.sv
+@@ -246,13 +246,92 @@ module pulp_soc import dm::*; #(
+   // the debug unit by fetching instructions from a speciac debug ROM within
+   // the debug unit itself (which is exposed as a normal soc peripheral to the
+   // soc_peripheral interconnect).
+-  output logic [NB_CORES-1:0]                                 cluster_dbg_irq_valid_o
++  output logic [NB_CORES-1:0]                                 cluster_dbg_irq_valid_o,
++
++  // DDR3 AXI4 Master Port (32-bit, synchronous to soc_clk_i)
++  output logic [AXI_ID_OUT_WIDTH-1:0]                         ddr_axi_aw_id_o,
++  output logic [AXI_ADDR_WIDTH-1:0]                           ddr_axi_aw_addr_o,
++  output logic [7:0]                                          ddr_axi_aw_len_o,
++  output logic [2:0]                                          ddr_axi_aw_size_o,
++  output logic [1:0]                                          ddr_axi_aw_burst_o,
++  output logic                                                ddr_axi_aw_lock_o,
++  output logic [3:0]                                          ddr_axi_aw_cache_o,
++  output logic [2:0]                                          ddr_axi_aw_prot_o,
++  output logic [3:0]                                          ddr_axi_aw_qos_o,
++  output logic [3:0]                                          ddr_axi_aw_region_o,
++  output logic [5:0]                                          ddr_axi_aw_atop_o,
++  output logic [AXI_USER_WIDTH-1:0]                           ddr_axi_aw_user_o,
++  output logic                                                ddr_axi_aw_valid_o,
++  input  logic                                                ddr_axi_aw_ready_i,
++  output logic [AXI_DATA_OUT_WIDTH-1:0]                       ddr_axi_w_data_o,
++  output logic [AXI_STRB_WIDTH_OUT-1:0]                       ddr_axi_w_strb_o,
++  output logic                                                ddr_axi_w_last_o,
++  output logic [AXI_USER_WIDTH-1:0]                           ddr_axi_w_user_o,
++  output logic                                                ddr_axi_w_valid_o,
++  input  logic                                                ddr_axi_w_ready_i,
++  input  logic [AXI_ID_OUT_WIDTH-1:0]                         ddr_axi_b_id_i,
++  input  logic [1:0]                                          ddr_axi_b_resp_i,
++  input  logic [AXI_USER_WIDTH-1:0]                           ddr_axi_b_user_i,
++  input  logic                                                ddr_axi_b_valid_i,
++  output logic                                                ddr_axi_b_ready_o,
++  output logic [AXI_ID_OUT_WIDTH-1:0]                         ddr_axi_ar_id_o,
++  output logic [AXI_ADDR_WIDTH-1:0]                           ddr_axi_ar_addr_o,
++  output logic [7:0]                                          ddr_axi_ar_len_o,
++  output logic [2:0]                                          ddr_axi_ar_size_o,
++  output logic [1:0]                                          ddr_axi_ar_burst_o,
++  output logic                                                ddr_axi_ar_lock_o,
++  output logic [3:0]                                          ddr_axi_ar_cache_o,
++  output logic [2:0]                                          ddr_axi_ar_prot_o,
++  output logic [3:0]                                          ddr_axi_ar_qos_o,
++  output logic [3:0]                                          ddr_axi_ar_region_o,
++  output logic [AXI_USER_WIDTH-1:0]                           ddr_axi_ar_user_o,
++  output logic                                                ddr_axi_ar_valid_o,
++  input  logic                                                ddr_axi_ar_ready_i,
++  input  logic [AXI_ID_OUT_WIDTH-1:0]                         ddr_axi_r_id_i,
++  input  logic [AXI_DATA_OUT_WIDTH-1:0]                       ddr_axi_r_data_i,
++  input  logic [1:0]                                          ddr_axi_r_resp_i,
++  input  logic                                                ddr_axi_r_last_i,
++  input  logic [AXI_USER_WIDTH-1:0]                           ddr_axi_r_user_i,
++  input  logic                                                ddr_axi_r_valid_i,
++  output logic                                                ddr_axi_r_ready_o,
++
++  // HWPE AXI master port (128-bit, read-only + tied-off write)
++  // AXI AR channel
++  output logic [31:0]                                         hwpe_axi_ar_addr_o,
++  output logic [7:0]                                          hwpe_axi_ar_len_o,
++  output logic [2:0]                                          hwpe_axi_ar_size_o,
++  output logic [1:0]                                          hwpe_axi_ar_burst_o,
++  output logic                                                hwpe_axi_ar_valid_o,
++  input  logic                                                hwpe_axi_ar_ready_i,
++  // AXI R channel
++  input  logic [255:0]                                        hwpe_axi_r_data_i,
++  input  logic [1:0]                                          hwpe_axi_r_resp_i,
++  input  logic                                                hwpe_axi_r_last_i,
++  input  logic                                                hwpe_axi_r_valid_i,
++  output logic                                                hwpe_axi_r_ready_o,
++  // AXI AW channel (tied off)
++  output logic [31:0]                                         hwpe_axi_aw_addr_o,
++  output logic [7:0]                                          hwpe_axi_aw_len_o,
++  output logic [2:0]                                          hwpe_axi_aw_size_o,
++  output logic [1:0]                                          hwpe_axi_aw_burst_o,
++  output logic                                                hwpe_axi_aw_valid_o,
++  input  logic                                                hwpe_axi_aw_ready_i,
++  // AXI W channel (tied off)
++  output logic [255:0]                                        hwpe_axi_w_data_o,
++  output logic [31:0]                                         hwpe_axi_w_strb_o,
++  output logic                                                hwpe_axi_w_last_o,
++  output logic                                                hwpe_axi_w_valid_o,
++  input  logic                                                hwpe_axi_w_ready_i,
++  // AXI B channel (tied off)
++  input  logic [1:0]                                          hwpe_axi_b_resp_i,
++  input  logic                                                hwpe_axi_b_valid_i,
++  output logic                                                hwpe_axi_b_ready_o
+ );
+ 
+   localparam NB_L2_BANKS = `NB_L2_CHANNELS;
+   //The L2 parameter do not influence the size of the memories. Change them in the l2_ram_multibank. This parameters
+   //are only here to save area in the uDMA by only storing relevant bits.
+-  localparam L2_BANK_SIZE          = 16384;            // in 32-bit words
++  localparam L2_BANK_SIZE          = 32768;            // in 32-bit words
+   localparam L2_MEM_ADDR_WIDTH     = $clog2(L2_BANK_SIZE * NB_L2_BANKS) - $clog2(NB_L2_BANKS);    // 2**L2_MEM_ADDR_WIDTH rows (64bit each) in L2 --> TOTAL L2 SIZE = 8byte * 2^L2_MEM_ADDR_WIDTH
+   localparam NB_L2_BANKS_PRI       = 2;
+ 
+@@ -419,6 +498,13 @@ module pulp_soc import dm::*; #(
+ 
+   //assign s_data_out_bus.aw_atop = 6'b0;
+ 
++  AXI_BUS #(
++    .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH    ),
++    .AXI_DATA_WIDTH ( AXI_DATA_OUT_WIDTH),
++    .AXI_ID_WIDTH   ( AXI_ID_OUT_WIDTH  ),
++    .AXI_USER_WIDTH ( AXI_USER_WIDTH    )
++  ) s_ddr_axi_bus ();
++
+   AXI_LITE #(.AXI_ADDR_WIDTH(32), .AXI_DATA_WIDTH(32)) s_periph_bus ();
+ 
+   XBAR_TCDM_BUS s_mem_rom_bus ();
+@@ -783,7 +869,34 @@ module pulp_soc import dm::*; #(
+     .interrupts_i       ( s_fc_interrupts               ),
+     .hwpe_events_o      ( s_fc_hwpe_events              ),
+ 
+-    .supervisor_mode_o  ( s_supervisor_mode             )
++    .supervisor_mode_o  ( s_supervisor_mode             ),
++
++    // HWPE AXI master port passthrough
++    .hwpe_axi_ar_addr_o  ( hwpe_axi_ar_addr_o  ),
++    .hwpe_axi_ar_len_o   ( hwpe_axi_ar_len_o   ),
++    .hwpe_axi_ar_size_o  ( hwpe_axi_ar_size_o  ),
++    .hwpe_axi_ar_burst_o ( hwpe_axi_ar_burst_o ),
++    .hwpe_axi_ar_valid_o ( hwpe_axi_ar_valid_o ),
++    .hwpe_axi_ar_ready_i ( hwpe_axi_ar_ready_i ),
++    .hwpe_axi_r_data_i   ( hwpe_axi_r_data_i   ),
++    .hwpe_axi_r_resp_i   ( hwpe_axi_r_resp_i   ),
++    .hwpe_axi_r_last_i   ( hwpe_axi_r_last_i   ),
++    .hwpe_axi_r_valid_i  ( hwpe_axi_r_valid_i  ),
++    .hwpe_axi_r_ready_o  ( hwpe_axi_r_ready_o  ),
++    .hwpe_axi_aw_addr_o  ( hwpe_axi_aw_addr_o  ),
++    .hwpe_axi_aw_len_o   ( hwpe_axi_aw_len_o   ),
++    .hwpe_axi_aw_size_o  ( hwpe_axi_aw_size_o  ),
++    .hwpe_axi_aw_burst_o ( hwpe_axi_aw_burst_o ),
++    .hwpe_axi_aw_valid_o ( hwpe_axi_aw_valid_o ),
++    .hwpe_axi_aw_ready_i ( hwpe_axi_aw_ready_i ),
++    .hwpe_axi_w_data_o   ( hwpe_axi_w_data_o   ),
++    .hwpe_axi_w_strb_o   ( hwpe_axi_w_strb_o   ),
++    .hwpe_axi_w_last_o   ( hwpe_axi_w_last_o   ),
++    .hwpe_axi_w_valid_o  ( hwpe_axi_w_valid_o  ),
++    .hwpe_axi_w_ready_i  ( hwpe_axi_w_ready_i  ),
++    .hwpe_axi_b_resp_i   ( hwpe_axi_b_resp_i   ),
++    .hwpe_axi_b_valid_i  ( hwpe_axi_b_valid_i  ),
++    .hwpe_axi_b_ready_o  ( hwpe_axi_b_ready_o  )
+   );
+ 
+   soc_interconnect_wrap #(
+@@ -803,12 +916,64 @@ module pulp_soc import dm::*; #(
+     .tcdm_hwpe               ( s_lint_hwpe_bus     ),
+     .axi_master_plug         ( s_data_in_bus       ),
+     .axi_slave_plug          ( s_data_out_bus      ),
++    .axi_ddr_plug            ( s_ddr_axi_bus       ),
+     .axi_lite_peripheral_bus ( s_periph_bus        ),
+     .l2_interleaved_slaves   ( s_mem_l2_bus        ),
+     .l2_private_slaves       ( s_mem_l2_pri_bus    ),
+     .boot_rom_slave          ( s_mem_rom_bus       )
+   );
+ 
++  // DDR3 AXI flat signal assignments
++  assign ddr_axi_aw_id_o     = s_ddr_axi_bus.aw_id;
++  assign ddr_axi_aw_addr_o   = s_ddr_axi_bus.aw_addr;
++  assign ddr_axi_aw_len_o    = s_ddr_axi_bus.aw_len;
++  assign ddr_axi_aw_size_o   = s_ddr_axi_bus.aw_size;
++  assign ddr_axi_aw_burst_o  = s_ddr_axi_bus.aw_burst;
++  assign ddr_axi_aw_lock_o   = s_ddr_axi_bus.aw_lock;
++  assign ddr_axi_aw_cache_o  = s_ddr_axi_bus.aw_cache;
++  assign ddr_axi_aw_prot_o   = s_ddr_axi_bus.aw_prot;
++  assign ddr_axi_aw_qos_o    = s_ddr_axi_bus.aw_qos;
++  assign ddr_axi_aw_region_o = s_ddr_axi_bus.aw_region;
++  assign ddr_axi_aw_atop_o   = s_ddr_axi_bus.aw_atop;
++  assign ddr_axi_aw_user_o   = s_ddr_axi_bus.aw_user;
++  assign ddr_axi_aw_valid_o  = s_ddr_axi_bus.aw_valid;
++  assign s_ddr_axi_bus.aw_ready = ddr_axi_aw_ready_i;
++
++  assign ddr_axi_w_data_o    = s_ddr_axi_bus.w_data;
++  assign ddr_axi_w_strb_o    = s_ddr_axi_bus.w_strb;
++  assign ddr_axi_w_last_o    = s_ddr_axi_bus.w_last;
++  assign ddr_axi_w_user_o    = s_ddr_axi_bus.w_user;
++  assign ddr_axi_w_valid_o   = s_ddr_axi_bus.w_valid;
++  assign s_ddr_axi_bus.w_ready  = ddr_axi_w_ready_i;
++
++  assign s_ddr_axi_bus.b_id    = ddr_axi_b_id_i;
++  assign s_ddr_axi_bus.b_resp  = ddr_axi_b_resp_i;
++  assign s_ddr_axi_bus.b_user  = ddr_axi_b_user_i;
++  assign s_ddr_axi_bus.b_valid = ddr_axi_b_valid_i;
++  assign ddr_axi_b_ready_o   = s_ddr_axi_bus.b_ready;
++
++  assign ddr_axi_ar_id_o     = s_ddr_axi_bus.ar_id;
++  assign ddr_axi_ar_addr_o   = s_ddr_axi_bus.ar_addr;
++  assign ddr_axi_ar_len_o    = s_ddr_axi_bus.ar_len;
++  assign ddr_axi_ar_size_o   = s_ddr_axi_bus.ar_size;
++  assign ddr_axi_ar_burst_o  = s_ddr_axi_bus.ar_burst;
++  assign ddr_axi_ar_lock_o   = s_ddr_axi_bus.ar_lock;
++  assign ddr_axi_ar_cache_o  = s_ddr_axi_bus.ar_cache;
++  assign ddr_axi_ar_prot_o   = s_ddr_axi_bus.ar_prot;
++  assign ddr_axi_ar_qos_o    = s_ddr_axi_bus.ar_qos;
++  assign ddr_axi_ar_region_o = s_ddr_axi_bus.ar_region;
++  assign ddr_axi_ar_user_o   = s_ddr_axi_bus.ar_user;
++  assign ddr_axi_ar_valid_o  = s_ddr_axi_bus.ar_valid;
++  assign s_ddr_axi_bus.ar_ready = ddr_axi_ar_ready_i;
++
++  assign s_ddr_axi_bus.r_id    = ddr_axi_r_id_i;
++  assign s_ddr_axi_bus.r_data  = ddr_axi_r_data_i;
++  assign s_ddr_axi_bus.r_resp  = ddr_axi_r_resp_i;
++  assign s_ddr_axi_bus.r_last  = ddr_axi_r_last_i;
++  assign s_ddr_axi_bus.r_user  = ddr_axi_r_user_i;
++  assign s_ddr_axi_bus.r_valid = ddr_axi_r_valid_i;
++  assign ddr_axi_r_ready_o   = s_ddr_axi_bus.r_ready;
++
+   /* Debug Subsystem */
+ 
+   dmi_jtag #(
