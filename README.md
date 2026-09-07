@@ -73,6 +73,11 @@ PyTorch reference (112,500 pairs, 4/5 configs bit-exact, the Q8.8 config within
 max-diff 3), plus a full 3840×2160 frame pulled off real DDR3 via JTAG and
 diffed against the same reference — 8,294,400 / 8,294,400 bit-exact.
 
+Beyond bit-exactness against the reference, the model itself is a real
+quality improvement over naive upscaling:
+
+![Bicubic vs. SRCNN, PSNR comparison on three test images](docs/demo_result.png)
+
 ## Reproducing
 
 This accelerator is built against `pulp_soc` v5.0.1 inside a standard
