@@ -16,7 +16,6 @@ inside a normal `pulpissimo` checkout. See [Reproducing](#reproducing) below.
 | | |
 |---|---|
 | **Speedup vs. CPU-only im2col baseline** | 79× (8.76 s → 110.8 ms per frame) |
-| **PE utilization, out_ch=1 layer** | 25% → 99.87% (Mode B systolic remap) |
 | **Accuracy, 5 channel configs vs. PyTorch golden** | 112,500 / 112,500 pixel comparisons, 4/5 configs bit-exact |
 | **Accuracy, UHD 3840×2160 exhaustive** | 8,294,400 / 8,294,400 bit-exact |
 | **FPGA resources (Kintex-7 xc7k325t)** | LUT 31.0% · FF 9.4% · BRAM36 44.0% · DSP48E1 9.2% |
@@ -24,7 +23,7 @@ inside a normal `pulpissimo` checkout. See [Reproducing](#reproducing) below.
 ## What this is
 
 - **SoC**: PULPissimo — CV32E40P RISC-V core (RV32IMC)
-- **Board**: Digilent Genesys2, Xilinx Kintex-7 xc7k325t, DDR3 via MIG
+- **Board**: Digilent Genesys2, Xilinx Kintex-7 xc7k325t
 - **Network**: SRCNN, 3 conv layers (1→N→N→1 channels, 3×3 kernels, Q8.8 fixed-point), 5+ channel configurations validated on the same fixed 64-PE datapath
 - **Core idea**: the CPU never touches pixel data. It configures a fixed hardware
   datapath over memory-mapped CSRs and lets a 64-PE systolic array do the work —
@@ -80,43 +79,6 @@ directly at the `fc_subsystem` / `pulp_soc` boundary, bypassing the crossbar
 entirely so the two kinds of traffic never contend. Full reasoning and the
 exact upstream diffs are in `rtl/integration/`.
 
-## Optimization journey
-
-Per-FSM-state cycle counters (added directly in `fc_hwpe.sv`) turned "it's
-slow" into a measurable claim: im2col was 89% of runtime while actual MAC
-compute was ~2%. Every optimization round after that targeted only im2col —
-the rest of the pipeline stayed flat at ~32ms regardless:
-
-| Stage | HWPE total | im2col | Speedup (cumulative) |
-|---|---|---|---|
-| CPU-only im2col (baseline) | 8,760 ms | — | 1× |
-| HW im2col, naive single-beat AXI | 287.5 ms | 255.7 ms | 30.5× |
-| + Line buffer (removes 9× redundant TCDM reads) | 232.0 ms | 200.0 ms | 37.8× |
-| + 4-way parallel BRAM read | 163.5 ms | 131.7 ms | 53.6× |
-| + AXI burst (16-beat), final | 110.8 ms | 79.0 ms | **79.1×** |
-
-## Engineering notes worth reading
-
-- **A real alignment bug, not a logic bug**: the DDR3-direct rewrite silently
-  shifted output rows by 6 pixels. Root cause: the im2col AXI read address
-  wasn't 32-byte aligned for `img_w=150`; the DDR3 controller rounded down.
-  The error was masked by ReLU zeroing early channels and only surfaced once
-  the last layer accumulated it. Fix (`hwpe_im2col.sv`): align the AXI address
-  down, and track the discarded pixel offset in a per-row `row_skip_q` table so
-  the compute phase reads from the right slot.
-- **Dead code, left honest**: `fc_hwpe.sv` still instantiates a 3-port TCDM
-  address generator (`hwpe_addr_gen`, superseded by `hwpe_im2col`'s AXI path —
-  its own comment notes it was starving CPU TCDM arbitration when live) and a
-  `hwpe_mac_array` (replaced by the systolic array), both permanently disabled
-  via tied-off enable signals rather than removed. Of the accelerator's 4 TCDM
-  master ports, only 1 (`hwpe_weight_buf`) ever issues a real request — this
-  is visible directly in `rtl/legacy/` and in the tie-offs inside `fc_hwpe.sv`.
-- **Mode B — reusing hardware instead of growing it**: SRCNN's last layer has
-  1 output channel, so the naive 4-row×16-col systolic mapping leaves 3 of 4
-  rows idle (25% utilization). Mode B reinterprets the same 64 physical PEs as
-  1×64 (broadcast one weight to all 64 PEs, 64 pixels in parallel) — no extra
-  hardware, PE utilization goes to 99.87%.
-
 ## Verification
 
 Exhaustive, not sampled: 5 channel configs compared pixel-for-pixel against a
@@ -138,14 +100,3 @@ Then apply the patches in `rtl/integration/` against the checked-out
 `pulp_soc` sources (`.bender/git/checkouts/pulp_soc-*/`), and drop the files
 from `rtl/` into `rtl/fc/` in that same checkout. `sw/test.c` builds against
 PULP's `pulp-runtime` the normal way (`make clean all platform=fpga io=uart`).
-
-## Development notes
-
-RTL and SW in this repo were implemented with Claude Code, under close
-direction: architecture decisions (DDR3-direct redesign, Mode B remapping,
-AXI/TCDM path separation), debugging (the alignment bug above), verification
-methodology, and FPGA bring-up were driven and checked step by step rather
-than accepted as a black box. This repo was also used as a deliberate code
-walkthrough after the fact — reading every file, diffing against upstream
-PULP, and confirming line-by-line what each piece actually does — specifically
-so the implementation could be explained and defended in depth, not just cited.
